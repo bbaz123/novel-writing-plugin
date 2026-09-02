@@ -70,3 +70,4 @@ pnpm dsh --profile headless "只输出一行：你当前可用的全部工具名
 - Windows（脚本为 PowerShell；模块为纯 ESM JS，无第三方依赖）
 - deepseek-harness（dsh）本地源仓库 + headless profile（`dsh --profile headless` 可跑通）
 - novel-studio 本地服务（http://127.0.0.1:3737，默认端口可用 `PORT` 覆盖并在 patch 的 `baseUrl` 同步）
+- novel-studio本地服务源代码以及安装地址：https://github.com/bbaz123/novel-studio
