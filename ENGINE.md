@@ -43,6 +43,9 @@ dsh headless / dsh 会话
 | `GET /api/story_memory/versions?work_id=` | 记忆版本历史 |
 | `POST /api/story_memory/rollback` | 回滚到指定记忆版本 |
 | `PUT /api/story_memory` | 提交记忆（支持 `summary` 或 `delta` 增量；可选 `source/note`） |
+| `GET /api/demo/status` | 示例小说《雾都缝匠》导入状态（`{exists, work_id}`） |
+| `POST /api/demo/install` | 一键导入示例小说（`body.force=true` 覆盖重装；数据来自与 server.js 同目录的 `demo-data.json`） |
+| `POST /api/demo/remove` | 删除示例小说（级联清理全部演示数据） |
 
 ## 四、dsh 侧挂载（两处，均已实测可用）
 

@@ -14,16 +14,17 @@
 | --- | --- |
 | `headless-profile/` | **核心**：注入 novel-studio 后台 dsh 的文件（`cordis.patch.yml` + `novel-tools.mjs`），放在 `~/.dsh/profiles/headless/` |
 | `novel-writing/` | agent preset（GUI 交互会话用），放在 `~/.dsh/.agent-presets/novel-writing/` |
-| `novel-studio-patch/` | novel-studio 服务端引擎改动（`db.js` / `server.js` / `harness.js` / `public/app.js`），覆盖到你的 novel-studio 目录 |
+| `novel-studio-patch/` | novel-studio 服务端引擎改动（`db.js` / `server.js` / `harness.js` / `public/app.js` / `demo-data.json`），覆盖到你的 novel-studio 目录 |
 | `install.ps1` | 一键安装（自动备份原 headless patch） |
-| `demo/` | 示例小说《雾都缝匠》演示数据（`demo-data.json` + `seed-demo.js` 一键导入/删除） |
+| `demo/` | 示例小说《雾都缝匠》演示数据（`demo-data.json` + `seed-demo.js`，命令行导入/删除；应用内置“我的作品→一键导入”后可选） |
 | `ENGINE.md` | 架构、数据表、REST 端点、挂载与验证细节 |
 
 ## 安装（两步）
 
 ```powershell
-# 1) 升级 novel-studio 服务端：把 novel-studio-patch\ 内 4 个文件覆盖到你的 novel-studio 目录，
-#    重启：npm start（数据库启动时自动迁移：story_events / memory_versions / writing_redlines，
+# 1) 升级 novel-studio 服务端：把 novel-studio-patch\ 内 5 个文件覆盖到你的 novel-studio 目录
+#    （db.js / server.js / harness.js / public/app.js / demo-data.json），重启：npm start
+#    （数据库启动时自动迁移：story_events / memory_versions / writing_redlines，
 #    world_entries 自动补 priority 列）
 
 # 2) 安装 dsh 侧文件：
@@ -44,7 +45,7 @@ pnpm dsh --profile headless "只输出一行：你当前可用的全部工具名
 
 ## 示例数据（《雾都缝匠》）
 
-`demo/` 里带一部可直接导入的演示小说，用来体验整套插件（含世界观词条激活、角色卡口吻、前文衔接、伏笔/事件账本与红线约束）：
+`demo/` 里带一部可直接导入的演示小说，用来体验整套插件（含世界观词条激活、角色卡口吻、前文衔接、伏笔/事件账本与红线约束）。**推荐方式**：打开 novel-studio →“我的作品”→ 示例小说卡片 → “一键导入《雾都缝匠》”（应用内置按钮，可打开/重新导入/删除）。命令行方式同样可用：
 
 ```bash
 # 前置：novel-studio 已应用 novel-studio-patch 并运行（http://127.0.0.1:3737）
