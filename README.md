@@ -1,92 +1,103 @@
-# Novel Writing 创作插件（novel-writing-plugin）
+# Novel Writing 创作插件（内置版 · 面向 Novel Studio）
 
-让 **novel-studio 网页里点“AI 创作/续写/润色”所调起的 dsh（deepseek-harness）** 自动具备
-小说创作人格与 `novel_*` 工具：写作前拉取世界观/角色卡/长期记忆上下文（ST 式分层装配），
-产出后自动做“反 AI 腔”红线扫描、事件入账、长期记忆版本化（git 式、可回滚）。
+这是 **Novel Studio（小说创作工坊）内置的创作插件**：不是独立分发、不依赖外部仓库，
+插件的 dsh 侧源码与工坊服务端创作内核**同仓维护、一起升级**。
 
-> ✅ 已实测：headless 工具目录出现全部 7 个 `novel_*` 工具；经由
-> novel-studio `/api/harness/run` 的真实任务成功调用 `novel_context`
-> 读取到作品上下文与红线清单，零编造。
+> **仓库关系**：本目录的规范源在 novel-studio 仓库的 `harness-plugins/novel-writing/`。
+> 若本目录同时以独立仓库（bbaz123/novel-writing-plugin）发布，则该仓库是发布镜像：
+> 两份文件内容保持一致；安装请优先使用 novel-studio 仓库内的版本。
 
-## 目录
-
-| 路径 | 说明 |
-| --- | --- |
-| `headless-profile/` | **核心**：注入 novel-studio 后台 dsh 的文件（`cordis.patch.yml` + `novel-tools.mjs`），放在 `~/.dsh/profiles/headless/` |
-| `novel-writing/` | agent preset（GUI 交互会话用），放在 `~/.dsh/.agent-presets/novel-writing/` |
-| `novel-studio-patch/` | novel-studio 服务端引擎改动（`db.js` / `server.js` / `harness.js` / `public/app.js` / `demo-data.json`），覆盖到你的 novel-studio 目录 |
-| `install.ps1` | 一键安装（自动备份原 headless patch） |
-| `demo/` | 示例小说《雾都缝匠》演示数据（`demo-data.json` + `seed-demo.js`，命令行导入/删除；应用内置“我的作品→一键导入”后可选） |
-| `ENGINE.md` | 架构、数据表、REST 端点、挂载与验证细节 |
+```
+novel-studio/
+├─ db.js / server.js / harness.js / public/app.js   ← 工坊主体（创作内核：上下文装配/红线/事件账本/记忆版本/提案确认）
+└─ harness-plugins/novel-writing/                   ← 本插件（dsh 侧唯一来源）
+   ├─ novel-tools.mjs           # novel_* 工具集（headless 与 GUI preset 同源）
+   ├─ agent.cordis.yml          # GUI 会话 preset（写作人设 + novel_* 工具 + fs）
+   ├─ preset.yml                # preset 元信息
+   ├─ headless-cordis.patch.yml # 注入 headless profile 的区块片段（合并式安装）
+   ├─ install.ps1               # 一键安装/升级/卸载（区块合并、保留用户其它 patch）
+   ├─ plugin.json               # 清单：工具/端点/契约（文档与测试的唯一真源）
+   ├─ test/smoke.mjs            # 端到端冒烟测试（node:test）
+   ├─ ENGINE.md                 # 架构、端点、验收细节
+   ├─ NATIVE_PLUGIN_GUIDE.md    # 如何在工坊内扩展本插件
+   └─ README.md                 # 本文件
+```
 
 ## 安装（两步）
 
 ```powershell
-# 1) 升级 novel-studio 服务端：把 novel-studio-patch\ 内 5 个文件覆盖到你的 novel-studio 目录
-#    （db.js / server.js / harness.js / public/app.js / demo-data.json），重启：npm start
-#    （数据库启动时自动迁移：story_events / memory_versions / writing_redlines，
-#    world_entries 自动补 priority 列）
+# 1) 工坊本体：直接使用 novel-studio 仓库（创作内核已内置，无需覆盖任何补丁文件）。
+#    重启：npm start（数据库启动时自动迁移新表/新列）
 
-# 2) 安装 dsh 侧文件：
+# 2) dsh 侧（本目录；发布镜像仓库中本目录即仓库根）：
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+# 预演不落盘：… install.ps1 -DryRun    卸载：… install.ps1 -Uninstall
 ```
 
 完成后打开 novel-studio 使用 AI 创作即可——后台 headless dsh 自动携带 novel 工具与创作纪律，
-无需在 dsh 界面手动选择 preset（身份经 `NOVELSTUDIO_WORK_ID/CHAPTER_ID/MODE` 环境变量注入）。
+无需在 dsh 界面手动选 preset（身份经 `NOVELSTUDIO_WORK_ID/CHAPTER_ID/MODE` 环境变量注入）。
 
 ## 验证
 
 ```bash
+# 服务端冒烟测试（不依赖 dsh，纯 HTTP 断言；需能定位到 novel-studio 仓库，
+# 或用 NOVELSTUDIO_REPO 环境变量指定其根目录）
+node test/smoke.mjs
+
+# dsh 侧工具目录
 cd <你的 deepseek-harness 目录>
 pnpm dsh --profile headless "只输出一行：你当前可用的全部工具名称，用逗号分隔"
-# 期望出现：novel_context, novel_works, novel_lookup, novel_scan,
-#           novel_style_contract, novel_event_add, novel_memory_update
+# 期望出现：novel_context, novel_works, novel_lookup, novel_scan, novel_style_contract,
+#           novel_event_add, novel_memory_update, novel_foreshadows, novel_consistency, novel_chapter_save
 ```
-
-## 示例数据（《雾都缝匠》）
-
-`demo/` 里带一部可直接导入的演示小说，用来体验整套插件（含世界观词条激活、角色卡口吻、前文衔接、伏笔/事件账本与红线约束）。**推荐方式**：打开 novel-studio →“我的作品”→ 示例小说卡片 → “一键导入《雾都缝匠》”（应用内置按钮，可打开/重新导入/删除）。命令行方式同样可用：
-
-```bash
-# 前置：novel-studio 已应用 novel-studio-patch 并运行（http://127.0.0.1:3737）
-node demo/seed-demo.js          # 导入（同名作品已存在会提示）
-node demo/seed-demo.js --fresh  # 覆盖导入
-node demo/seed-demo.js --delete # 删除示例作品（级联清理）
-```
-
-演示内容包括：2 卷 / 3 条剧情线（含暗线）/ 6 章（前 4 章有正文，后 2 章留空待续写）/
-4 张角色卡（含对话示例与角色系统提示）/ 5 条世界观词条（固定+关键词激活+优先级）/
-长期记忆摘要 / 4 条事件账本（含伏笔与状态变化）。
-第三章正文里故意保留了几处 AI 腔句式，可用来跑 `novel_scan` 看红线命中效果。
-导入后即可让 dsh 以《雾都缝匠》为背景做续写/分析（dsh 会话里用 `novel_context` 选 work 或直接用 novel-studio 网页 AI 续写第五章）。
 
 ## 工具一览
 
 | 工具 | 作用 |
 | --- | --- |
-| `novel_context` | 取作品/章节分层上下文（大纲进度/长期记忆/最近事件/前后章衔接/角色卡/激活世界观/写作红线），mode: full/continuation/fragment |
+| `novel_context` | 取作品/章节分层上下文（大纲/记忆/事件/未闭合伏笔/前后章衔接/角色卡/激活世界观/红线），分层预算截断 |
 | `novel_works` | 列出作品（确认 work_id） |
 | `novel_lookup` | 关键词检索角色/词条/章节/剧情线（写前查证设定） |
-| `novel_scan` | 对正文做确定性反 AI 腔红线扫描（词/句式/正则） |
+| `novel_foreshadows` | 列出未闭合（或全部）伏笔 |
+| `novel_consistency` | 成文后一致性核对：未闭合伏笔/出场角色状态/最近事件 vs 正文 |
+| `novel_scan` | 确定性反 AI 腔红线扫描（可跳过引号内对话） |
 | `novel_style_contract` | 读取写作红线清单 |
-| `novel_event_add` | 关键剧情/伏笔/状态变化写入事件账本 |
-| `novel_memory_update` | 把进展并入长期记忆（summary 语义压缩提交，或 delta 追加；自动版本快照可回滚） |
+| `novel_event_add` | 事件/伏笔/状态变化入账（伏笔状态与回收、幂等去重；headless 先落提案） |
+| `novel_memory_update` | 长期记忆摘要压缩/增量提交（版本快照可回滚；headless 先落提案） |
+| `novel_chapter_save` | 成稿写回章节正文（旧稿自动存历史版本，返回红线扫描） |
 
-## 红线清单（默认 28 条）
+## 关键机制
 
-内置“反 AI 腔”红线（慎用词/慎用句式/句式模式三类，如：微微、缓缓、不禁、眸、嘴角、
-“眼中闪过”“空气仿佛凝固”“嘴角勾起一抹”等），可经 `PUT /api/novel/redlines` 全量替换；
-写作时约束、产出后确定性扫描。详见 ENGINE.md。
+- **提案确认（headless 防污染）**：novel-studio 网页启动的任务带 `NOVELSTUDIO_PROPOSE_MODE=1`，
+  AI 的事件/记忆入账先落提案表，任务结束随结果返回；作者在「AI 写作结果」弹窗勾选采纳，
+  或稍后在「小说设定 → 长期记忆 → 📥 待确认提案」里处理。GUI dsh 会话里作者在场，直接入账。
+- **伏笔闭环**：`novel_foreshadows` 查欠账 → 正文显式呼应 → `novel_event_add(resolves_event_id=…)`
+  自动把旧伏笔标记 resolved；`novel_context` 里始终带【未闭合伏笔】层。
+- **分层上下文预算**：每层独立上限、红线/角色卡保底、总量收敛截断，超长记忆标注压缩提示，
+  不再一刀切盲截。
+- **红线扫描**：默认 28 条反 AI 腔红线，作品级可覆盖（`PUT /api/novel/redlines`）；
+  扫描支持 `skip_dialogue`（引号内台词不计），正则模式有长度上限与编译校验。
+- **幂等与保留**：事件按 `dedup_key` 去重；记忆版本每作品保留最近 200 个，超限自动剪除；
+  正文写回前自动存章节历史版本。
+
+## 安全（本地工具也要防）
+
+- 服务端不再返回 `Access-Control-Allow-Origin: *`：跨源页面无法读取本地 API Key 与作品数据；
+  浏览器跨源写请求（POST/PUT/DELETE）一律 403。
+- 请求体上限 2MB；红线正则长度上限 500；非法 JSON/非 JSON 响应显式报错。
 
 ## 卸载 / 回退
 
-- 删除 `%USERPROFILE%\.dsh\.agent-presets\novel-writing`
-- 用安装时备份的 `cordis.patch.yml.bak-*` 覆盖回 `%USERPROFILE%\.dsh\profiles\headless\cordis.patch.yml`，删除 `novel-tools.mjs`
-- 服务端改动向后兼容（新表/新列不影响旧功能），建议保留
+```powershell
+powershell -ExecutionPolicy Bypass -File .\harness-plugins\novel-writing\install.ps1 -Uninstall
+```
+
+- 删除 `~/.dsh/.agent-presets/novel-writing`（GUI preset）
+- 从 `~/.dsh/profiles/headless/cordis.patch.yml` 中整段移除本插件区块（保留其它 patch 条目）
+- 工坊服务端的新表/新列向后兼容（旧功能不受影响），建议保留
 
 ## 环境要求
 
-- Windows（脚本为 PowerShell；模块为纯 ESM JS，无第三方依赖）
-- deepseek-harness（dsh）本地源仓库 + headless profile（`dsh --profile headless` 可跑通）
-- novel-studio 本地服务（http://127.0.0.1:3737，默认端口可用 `PORT` 覆盖并在 patch 的 `baseUrl` 同步）
-- novel-studio本地服务源代码以及安装地址：https://github.com/bbaz123/novel-studio
+- Windows（安装脚本为 PowerShell；模块为纯 ESM JS，无第三方依赖）
+- Node.js 22.5+（novel-studio 本体）+ 已构建的 deepseek-harness（dsh）仓库 + headless profile
+- novel-studio 本地服务（http://127.0.0.1:3737，`PORT` 可覆盖；dsh 工具通过 `NOVELSTUDIO_BASE_URL` 自动定位）
