@@ -28,7 +28,7 @@
 
 export const name = 'novel-tools'
 export const inject = ['tools']
-export const PLUGIN_VERSION = '0.7.0'
+export const PLUGIN_VERSION = '0.8.0'
 
 const DEFAULT_BASE = 'http://127.0.0.1:3737'
 
@@ -43,35 +43,82 @@ const textOutput = {
 }
 
 export function apply(ctx, config) {
-  const baseOf = () => (config && config.baseUrl) || process.env.NOVELSTUDIO_BASE_URL || DEFAULT_BASE
+  // N-01 配套：任务启动器注入的 NOVELSTUDIO_BASE_URL 优先于安装时写入的 config.baseUrl，
+  // 保证多实例（如冒烟/隔离环境使用其他端口）时 novel_* 工具回连发起任务的那一个实例，
+  // 而不是安装时硬编码的端口（否则会把测试实例的 AI 入账写进主库）。
+  const baseOf = () => String(process.env.NOVELSTUDIO_BASE_URL || (config && config.baseUrl) || DEFAULT_BASE).replace(/\/+$/, '')
   const proposeMode = () => process.env.NOVELSTUDIO_PROPOSE_MODE === '1'
 
-  // 严格 JSON 客户端：连接失败/非 2xx/非 JSON 都给出可读错误，不把异常静默成 {raw}。
+  // 严格 JSON 客户端：连接失败/超时/非 2xx/非 JSON 都给出可读错误，不把异常静默成 {raw}。
+  // GET 请求仅在“连接失败”时自动重试一次（本地服务偶发未就绪）；超时与写请求都不重试，避免重复入账/雪崩。
   async function jfetch(path, options = {}) {
     const base = baseOf()
-    let res
+    const attempt = async () => {
+      let res
+      try {
+        res = await fetch(base + path, {
+          method: options.method || 'GET',
+          headers: { 'content-type': 'application/json' },
+          body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+          signal: AbortSignal.timeout(options.timeout || 25000),
+        })
+      } catch (e) {
+        const isTimeout = e?.name === 'TimeoutError' || e?.cause?.name === 'TimeoutError'
+        const msg = isTimeout
+          ? '请求超时（novel-studio 无响应，可稍后重试）'
+          : `无法连接 novel-studio（${base}）：请确认小说工坊服务已启动（npm start）。详情：${e.message}`;
+        reportJfetchError('error', 'plugin_error', msg, e?.stack, { path });
+        const err = new Error(msg)
+        err.nsReported = true
+        throw err
+      }
+      const text = await res.text()
+      if (!res.ok) {
+        let detail = text
+        try { detail = JSON.parse(text)?.error || detail } catch (_) { /* 保留原文 */ }
+        const msg = `novel-studio ${res.status} ${path}: ${String(detail).slice(0, 300)}`;
+        reportJfetchError('warn', 'plugin_error', msg, '', { path, status: res.status });
+        const err = new Error(msg)
+        err.nsReported = true
+        throw err
+      }
+      if (!text) return {}
+      try {
+        return JSON.parse(text)
+      } catch (_) {
+        const msg = `novel-studio 返回了非 JSON 响应（${path}）：${text.slice(0, 200)}`;
+        reportJfetchError('warn', 'plugin_error', msg, '', { path });
+        const err = new Error(msg)
+        err.nsReported = true
+        throw err
+      }
+    }
     try {
-      res = await fetch(base + path, {
-        method: options.method || 'GET',
-        headers: { 'content-type': 'application/json' },
-        body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: AbortSignal.timeout(options.timeout || 25000),
-      })
+      return await attempt()
     } catch (e) {
-      throw new Error(`无法连接 novel-studio（${base}）：请确认小说工坊服务已启动（npm start）。详情：${e.message}`)
+      const retryable = (options.method || 'GET') === 'GET' && /^无法连接 novel-studio/.test(String(e.message)) && !/超时/.test(String(e.message))
+      if (!retryable) throw e
+      await new Promise((r) => setTimeout(r, 300))
+      return await attempt()
     }
-    const text = await res.text()
-    if (!res.ok) {
-      let detail = text
-      try { detail = JSON.parse(text)?.error || detail } catch (_) { /* 保留原文 */ }
-      throw new Error(`novel-studio ${res.status} ${path}: ${String(detail).slice(0, 300)}`)
-    }
-    if (!text) return {}
+  }
+
+  // 插件进程（dsh headless）的异常上报：写入工坊统一日志库 /api/logs（layer=plugin）。
+  // fire-and-forget，绝不阻塞/影响工具调用本身；服务端按消息内容 10s 窗口去重。
+  const reportLog = (entry) => {
     try {
-      return JSON.parse(text)
-    } catch (_) {
-      throw new Error(`novel-studio 返回了非 JSON 响应（${path}）：${text.slice(0, 200)}`)
-    }
+      const base = baseOf()
+      fetch(`${base}/api/logs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ layer: 'plugin', level: 'error', ...entry }),
+        signal: AbortSignal.timeout(4000),
+      }).catch(() => { /* 上报失败静默 */ })
+    } catch (_) { /* 上报异常静默 */ }
+  }
+
+  function reportJfetchError(level, kind, message, stack, context) {
+    reportLog({ level, kind, message: String(message).slice(0, 4000), stack: String(stack || '').slice(0, 16000), context })
   }
 
   const envId = (args, key) => (args[key] !== undefined && args[key] !== null && args[key] !== '')
@@ -93,8 +140,16 @@ export function apply(ctx, config) {
       parameters: { type: 'object', properties: parameters, additionalProperties: false },
       output: textOutput,
       async execute(args) {
-        const text = await execute(args)
-        return { text: String(text ?? '') }
+        try {
+          const text = await execute(args)
+          return { text: String(text ?? '') }
+        } catch (e) {
+          // 工具级异常统一上报（jfetch 已上报过的错误带 nsReported 标记，避免重复）。
+          if (!e?.nsReported) {
+            reportJfetchError('error', 'plugin_error', `工具 ${name} 执行失败：${e.message}`, e?.stack, { tool: name });
+          }
+          throw e
+        }
       },
     })
   }
@@ -107,7 +162,7 @@ export function apply(ctx, config) {
   }, async (args) => {
     const works = await jfetch('/api/works')
     const list = Array.isArray(works) ? works : []
-    if (!list.length) return 'novel-studio 里还没有作品。请先在 novel-studio 网页创建作品，或确认服务已启动（http://127.0.0.1:3737）。'
+    if (!list.length) return `novel-studio 里还没有作品。请先在 novel-studio 网页创建作品，或确认服务已启动（${baseOf()}）。`
     return '作品列表：\n' + list.map((w) => {
       const desc = args.includeDescription && w.description ? `（${String(w.description).slice(0, 80)}）` : ''
       return `${w.id}. ${w.title}${desc}`
@@ -116,14 +171,14 @@ export function apply(ctx, config) {
 
   register('novel_context', [
     '写作前调用：取指定作品/章节的完整创作上下文（ST 式分层装配，每层有独立预算，超长会注明截断）。',
-    '包含：卷/剧情线/章节进度大纲、长期记忆摘要（过长时会标注建议压缩）、最近事件账本、未闭合伏笔、当前场景与前后章衔接、出场角色卡（含对话示例与角色系统提示）、人物关系、按优先级激活的世界观词条、写作风格红线。',
-    'output 的 assembled 字段就是可直接读入的整块上下文。',
-    'work_id/chapter_id 缺省时自动使用进程注入的身份（由 novel-studio 启动的任务自带）。mode: full=整章代写/分析, continuation=接龙续写, fragment=片段补写。',
+    '包含：卷/剧情线/章节进度大纲、长期记忆摘要（过长时会标注建议压缩）、最近事件账本、未闭合伏笔、当前场景与前后章衔接、出场角色卡（按相关性评分排序，别名/称呼同样命中，含对话示例与角色系统提示）、人物关系、按优先级激活的世界观词条、写作风格红线。',
+    'output 的 assembled 字段就是可直接读入的整块上下文；scene_characters 是出场角色名单（forced=true 表示作者在工坊「上下文」页签强制带入的角色，写作时必须让其出场）。',
+    'work_id/chapter_id 缺省时自动使用进程注入的身份（由 novel-studio 启动的任务自带）。mode: full=整章代写/分析, continuation=接龙续写, fragment=片段补写, settings=设定类生成轻量装配（不含当前场景/蓝图/前文衔接）。',
     '若任务提示词里已内联提供了同样的上下文（由 novel-studio 网页启动的任务通常如此），不必重复调用本工具，用 novel_lookup 按需补查即可。',
   ].join('\n'), {
     work_id: { type: 'string', description: '作品 id（可选，缺省用环境身份）' },
     chapter_id: { type: 'string', description: '章节 id（可选）' },
-    mode: { type: 'string', description: 'full | continuation | fragment（默认 full）' },
+    mode: { type: 'string', description: 'full | continuation | fragment | settings（默认 full）' },
   }, async (args) => {
     const workId = envId(args, 'work_id')
     if (workId === undefined) {
@@ -135,7 +190,7 @@ export function apply(ctx, config) {
     const mode = args.mode || process.env.NOVELSTUDIO_MODE || 'full'
     const ctx = await jfetch(`/api/novel/context${identitySuffix(workId, chapterId, mode)}`)
     if (!ctx.ok) throw new Error('novel-studio 返回异常')
-    const head = `作品：${ctx.work.title}${ctx.chapter ? `｜当前章节：第${ctx.chapter.position + 1}节 ${ctx.chapter.title}` : ''}（mode=${ctx.mode}）`
+    const head = `作品：${ctx.work?.title ?? ''}${ctx.chapter ? `｜当前章节：第${(ctx.chapter?.position ?? -1) + 1}节 ${ctx.chapter?.title ?? ''}` : ''}（mode=${ctx.mode ?? ''}）`
     const body = ctx.assembled || JSON.stringify(ctx)
     // 服务端已做分层预算收敛（总预算 26000 字），这里不再盲截断，避免砍掉末尾的红线/角色卡层。
     return `${head}\n\n${body}`
@@ -172,6 +227,11 @@ export function apply(ctx, config) {
       const pls = pick(data.plotlines)
       if (pls.length) out.push('剧情线：\n' + pls.map((p) => `- ${p.title}（${p.kind === 'side' ? '支线' : '主线'}）${p.summary ? `：${String(p.summary).slice(0, 120)}` : ''}`).join('\n'))
     }
+    // 语义检索（OpenViking 共享记忆库）：与关键词结果并列，供查证关键词没覆盖到的相关内容。
+    const sem = Array.isArray(data.semantic?.hits) ? data.semantic.hits.slice(0, 6) : []
+    if (!kind && sem.length) {
+      out.push('语义相关（记忆库）：\n' + sem.map((s) => `- 【${s.label}】${s.kind ? `（${s.kind}，相关度 ${s.score}%）` : ''}：${String(s.text || '').slice(0, 200)}`).join('\n'))
+    }
     if (!out.length) return `未检索到与“${query}”相关的内容。`
     return out.join('\n\n')
   })
@@ -199,7 +259,8 @@ export function apply(ctx, config) {
     '标记某条伏笔的状态：resolved=已回收（可同时用 resolves_event_id 回链回收事件）、dropped=废弃不再回收、open=恢复未闭合。',
     '伏笔 id 见 novel_foreshadows 的 #id；正文确认废弃/回收某伏笔后调用，让账本与正文一致。',
     '注意：正文回收伏笔时更推荐用 novel_event_add（kind=event + resolves_event_id），它会把“回收这件事”也记进事件账本；',
-    '本工具用于作者明确要求直接改状态（如废弃、恢复）的场景。',
+    '本工具用于作者明确要求直接改状态（如废弃、恢复）的场景（GUI 会话作者在场时）。',
+    '提案模式（novel-studio 网页启动的 headless 任务）下不直接改状态：请改走 novel_event_add（kind=event + resolves_event_id）以提案方式记录回收，或由作者在工坊伏笔面板确认。',
   ].join('\n'), {
     id: { type: 'number', description: '伏笔 id（见 novel_foreshadows 返回的 #id）' },
     status: { type: 'string', description: 'open | resolved | dropped（必填）' },
@@ -209,6 +270,12 @@ export function apply(ctx, config) {
     if (!id) throw new Error('缺少 id：伏笔 id 见 novel_foreshadows 返回的 #id')
     const status = String(args.status || '')
     if (!['open', 'resolved', 'dropped'].includes(status)) throw new Error('status 必须是 open/resolved/dropped')
+    // 本工具为 GUI 会话（作者在场）直改状态；headless 提案模式下不直接写账本，
+    // 改为提示作者改走 novel_event_add（kind=event + resolves_event_id）走提案确认，或在工坊伏笔面板操作。
+    if (proposeMode()) {
+      const label = status === 'resolved' ? '已回收' : status === 'dropped' ? '已废弃' : '恢复未闭合'
+      return `提案模式下不直接改动伏笔 #${id} 状态。请改用 novel_event_add（kind=event + resolves_event_id=${id}）以提案方式记录回收，或由作者在 novel-studio 伏笔面板直接确认「${label}」。`
+    }
     const data = await jfetch(`/api/novel/foreshadows/${id}/status`, {
       method: 'POST',
       body: { status, resolves_event_id: Number(args.resolves_event_id) || null }
@@ -248,14 +315,19 @@ export function apply(ctx, config) {
       lines.push('\n未闭合伏笔：无')
     }
     if (chars.length) {
-      lines.push('\n正文出场角色及其当前状态（检查人物状态/性格/说话方式是否一致）：')
-      chars.forEach((c) => lines.push(`- ${c.name}｜${c.identity || '身份未填'}｜当前状态：${c.status || '未填'}`))
+      lines.push('\n正文出场角色及其当前状态（检查人物状态/性格/说话方式是否与角色卡一致）：')
+      chars.forEach((c) => {
+        lines.push(`- ${c.name}（id=${c.id}）｜${c.identity || '身份未填'}｜当前状态：${c.status || '未填'}`)
+        if (Array.isArray(c.related_events) && c.related_events.length) {
+          c.related_events.forEach((e) => lines.push(`    ↳ 最近相关事件 #${e.id} [${e.kind}] ${String(e.summary).slice(0, 120)}`))
+        }
+      })
     } else {
       lines.push('\n正文出场角色：未能按姓名匹配到角色卡（可能为全新角色，提醒作者确认）')
     }
     if (events.length) {
       lines.push('\n最近事件账本（检查正文是否与此前发生的事冲突）：')
-      events.forEach((e) => lines.push(`- [${e.kind}] ${e.summary.slice(0, 160)}`))
+      events.forEach((e) => lines.push(`- [${e.kind ?? ''}] ${String(e.summary ?? '').slice(0, 160)}`))
     }
     if (c.story_memory) {
       lines.push('\n长期记忆摘要：')
@@ -263,6 +335,8 @@ export function apply(ctx, config) {
     }
     const scan = c.style_scan || {}
     lines.push(`\n风格红线扫描：${scan.total ? `命中 ${scan.total} 处` : '未命中'}`)
+    lines.push('\n角色状态提示：若正文显示某角色状态已变化（与“当前状态”不符），优先判定为“新进展”而非冲突：')
+    lines.push('用 novel_event_add(kind="character", payload={"character_id": <角色id>}, summary="新状态描述") 入账，并提醒作者在工坊角色面板一键同步到角色卡。')
     lines.push('\n请输出核对结论：先一句总结，再列冲突项（如有），每项附依据与建议改法；没有冲突则明确说明。')
     return lines.join('\n')
   })
@@ -284,7 +358,7 @@ export function apply(ctx, config) {
     const hits = Array.isArray(data.hits) ? data.hits : []
     if (!hits.length) return '红线扫描通过：未命中任何反 AI 腔条目。'
     const lines = hits.map((h) => `- ${h.pattern}（${h.kind}）x${h.count}${h.sample ? `\n  示例：…${String(h.sample).slice(0, 80)}…` : ''}`)
-    return `红线扫描命中 ${data.total} 处（建议改写后重扫）：\n${lines.join('\n')}`
+    return `红线扫描命中 ${data.total ?? hits.length} 处（建议改写后重扫）：\n${lines.join('\n')}`
   })
 
   register('novel_style_contract', [
@@ -306,6 +380,7 @@ export function apply(ctx, config) {
     '仅在正文确认生成/采纳后调用，避免污染账本。',
     '伏笔用法：新埋伏笔传 kind="foreshadow"（foreshadow_status 默认 open）；正文回收某伏笔时，',
     '传 kind="event" + resolves_event_id=该伏笔的 #id，服务端会自动把它标记为 resolved。',
+    '角色状态用法：正文确认某角色状态变化后，传 kind="character" + payload={character_id: 角色id}，summary 描述新状态；作者可在工坊角色面板一键同步为“当前状态”。',
     'dedup_key：同一事件的幂等键（如“ch12-mother-dies”），重复提交不会重复入账。',
     '提案模式说明：由 novel-studio 网页启动的任务，本调用会先写成提案，由作者在工坊界面确认后入账——这是正常行为，不要重复调用。',
   ].join('\n'), {
@@ -322,14 +397,22 @@ export function apply(ctx, config) {
     if (workId === undefined) throw new Error('未提供 work_id')
     const summary = String(args.summary || '').trim()
     if (!summary) throw new Error('缺少 summary')
+    const kind = args.kind || 'event'
+    if (!['event', 'foreshadow', 'character', 'status_change', 'setting_change'].includes(kind)) {
+      throw new Error(`kind 必须是 event/foreshadow/character/status_change/setting_change（收到：${kind}）`)
+    }
+    const foreshadowStatus = args.foreshadow_status || ''
+    if (!['', 'open', 'resolved', 'dropped'].includes(foreshadowStatus)) {
+      throw new Error(`foreshadow_status 必须是 open/resolved/dropped 或留空（收到：${foreshadowStatus}）`)
+    }
     const chapterId = envId(args, 'chapter_id')
     const body = {
       work_id: workId,
       chapter_id: chapterId,
-      kind: args.kind || 'event',
+      kind,
       summary,
       payload: args.payload || {},
-      foreshadow_status: args.foreshadow_status || '',
+      foreshadow_status: foreshadowStatus,
       resolves_event_id: args.resolves_event_id || null,
       dedup_key: args.dedup_key || '',
       proposed: proposeMode()

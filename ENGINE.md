@@ -49,10 +49,57 @@ dsh headless / dsh 会话（工具与人设同源：harness-plugins/novel-writin
 
 ### 3. 分层上下文预算
 
-`buildNovelContext` 每层独立上限（作品 900 / 大纲 2800 / 记忆 2200 / 事件 1800 / 伏笔 1200 /
+`buildNovelContext` 每层独立上限（作品 900 / 大纲 2800 / 记忆 2200 / **语义召回 1400** / 事件 1800 / 伏笔 1200 /
 场景 1200 / **蓝图 1500** / 前文衔接 1600–4000 / 角色卡 4000 / 关系 800 / 世界观 3000 / 红线 4000），
-整块结果再按 26000 字总预算收敛（弹性层依次收缩，红线层不动）；
+整块结果再按 26000 字总预算收敛（弹性层依次收缩，红线层不动；收敛按**层名定位**，
+旧实现按下标定位会在人物关系层为空时误伤红线层——v0.8.0 已修复）；
 记忆超过 1200 字压缩提示线时在上下文里标注，提醒模型优先压缩。
+
+### 3f. OpenViking 语义召回层（v0.8.0）
+
+- `buildNovelContext` 在「长期记忆」层之后装配【相关记忆检索（语义召回）】层：以当前章节
+  （标题/摘要/蓝图/开头正文）+ 最近事件为查询，从 OpenViking 共享记忆库的作品子树
+  （`user/default/resources/novel-studio/<workId>/`）语义召回相关片段（top 8、阈值 0.3、
+  命中内容 ≤300 字/条、层预算 1400 字），响应携带 `semantic_recall`（status/hits）；
+  30 秒微缓存；OpenViking 不可用/已禁用时静默跳过，装配不受影响。
+- `/api/ai_context` 同样携带 `semantic_recall.hits`，工坊正文 AI 写作提示词（蓝图/成文/续写）
+  在「长期记忆」之后注入召回片段，写作全程可见。
+- 六类数据（章节/记忆/事件/词条/角色卡/大纲）由工坊增量同步进记忆库（写操作 2s 防抖、
+  离线 pending 队列重放）；`POST /api/novel/semantic_index` 全量重建，
+  `GET/PUT /api/novel/semantic` 查看/开关语义召回；`NOVELSTUDIO_OV_DISABLED=1` 整体停用。
+
+### 3c. 出场角色评分制与角色卡核心保底（v0.8.0）
+
+- 出场角色选择改为评分制（`selectSceneCharacters`）：剧情线关联 +100 > 正文/摘要命中
+  （每命中 +12，封顶 60）> 蓝图/作者注/最近事件提及（+10/次，封顶 40）> 最近章节摘要出场
+  （+8/章，封顶 24）> 人物关系网（与信号角色直接关系 +5/条，封顶 20）；上限 16，
+  兜底从「按名字前 8」改为「最近出场优先 + 名字序」，并始终补齐到 8 个。
+- 名称命中走 `countNameHits`：正式名 + `characters.aliases`（逗号分隔）都参与；
+  单字 CJK 名称要求词边界（左右邻居非 CJK），杜绝「云」命中「云彩/李云」类子串误报；
+  多字名称直接计数。
+- 角色卡层不再整层头部盲截：`buildCharacterCards` 逐卡构建，每卡名字/身份/性格/当前状态
+  **必保**，背景/对话示例/系统提示/外貌/标签按 [500/400/400/400/200 → …→0] 分级压缩；
+  极端超限时逐卡均分预算，保证没有角色整卡丢失。
+- 作者在工坊「上下文」页签勾选的角色 = 章节级强制带入（`chapters.context_character_ids`，
+  逗号分隔 id），评分 +1000 置顶，随 `/api/novel/context` 与 `/api/ai_context` 一起生效。
+
+### 3d. 上下文预览页签与角色状态闭环（v0.8.0）
+
+- 写作页参考面板「上下文」页签：拉取 `/api/novel/context` 展示实际装配全文 + 出场角色名单
+  （区分「已自动带入 / 👤 强制带入 / 未带入」），勾选即保存为章节级强制带入。
+- 角色状态闭环：`POST /api/novel/consistency` 的 `present_characters` 现带 `id` 与
+  `related_events`（按名字/别名命中最近 30 条事件的摘要，≤5 条），供 AI 判断角色卡状态是否
+  已被最近事件推翻；AI 用 `novel_event_add(kind="character", payload={character_id})` 记录
+  新状态，作者在角色面板「⏱ 状态事件」一键把事件摘要同步为 `characters.status`。
+
+### 3e. 上下文缓存与装配热点（v0.8.0）
+
+- `/api/novel/context` 结果内存缓存（LRU ≤64，键 = work:chapter:mode）；任何写操作经
+  `touchWork`（通用 CRUD POST/PUT/DELETE、事件/记忆/红线/蓝图/审稿/写回全覆盖）递增
+  `CONTEXT_DATA_VERSION`，缓存整体失效，不会吐陈旧结果；
+- 长章节只按需转换纯文本：`plainTextHead/Tail` 先按 3 倍字符截取原始 HTML 再剥标签，
+  替代「全文剥标签后取头/尾」的浪费（压缩记忆、语料、前文尾巴等 6 处热点）；
+- 索引补齐：`plotline_characters(character_id)`、`character_relations(from/to)`。
 
 ### 3b. 章节蓝图与目标字数（写前规划 → 落库 → 常驻锚点）
 
