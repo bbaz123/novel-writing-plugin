@@ -1,0 +1,43 @@
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (32 assertion groups)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout plugin (this repository)
+        uses: actions/checkout@v4
+
+      # 冒烟测试需要 novel-studio 的 server.js 与 zip-reader.mjs。
+      # 本仓库是 novel-studio 内置插件的发布镜像，main 与其同步。
+      - name: Checkout novel-studio (server + fixtures)
+        uses: actions/checkout@v4
+        with:
+          repository: bbaz123/novel-studio
+          ref: main
+          path: novel-studio
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Node version
+        run: node -v
+
+      - name: Smoke suite
+        env:
+          NOVELSTUDIO_REPO: ${{ github.workspace }}/novel-studio
+          NOVELSTUDIO_OV_DISABLED: '1'
+        run: node test/smoke.mjs

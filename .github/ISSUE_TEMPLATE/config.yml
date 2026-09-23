@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🐞 Bug 报告 / 功能建议（请提到 novel-studio）
+    url: https://github.com/bbaz123/novel-studio/issues/new
+    about: 本仓库是发布镜像，代码规范源在 novel-studio。提到那里修复才能同时覆盖规范源与镜像。
+  - name: 📖 安装与使用说明
+    url: https://github.com/bbaz123/novel-writing-plugin#-3-分钟跑起来
+    about: 环境要求、安装步骤、工具列表与测试方法都在 README。
+  - name: 💬 应用本体（novel-studio）的问题
+    url: https://github.com/bbaz123/novel-studio
+    about: 界面、数据库、导入导出等工坊本体相关问题，请到 novel-studio。
